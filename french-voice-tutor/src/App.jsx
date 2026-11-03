@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { AudioLines, BookOpen, Check, Headphones, Mic, MicOff, Phone, Settings2, Sparkles, Volume2, X } from 'lucide-react'
 import './App.css'
 
-const API_BASE = import.meta.env.VITE_API_URL || ''
 const MODEL = 'gemini-3.1-flash-live-preview'
 const TEACHER = `Tu es Camille, une professeure de français de France, chaleureuse et professionnelle. L'apprenant a un niveau B1/B2. Parle principalement en français naturel de France, clairement et à un rythme modéré. Encourage-le à parler, pose des questions de suivi et privilégie une conversation vivante. Ne corrige pas chaque petite erreur. Corrige avec tact les erreurs importantes, explique brièvement en français simple, puis invite-le parfois à reformuler. Utilise le darija uniquement si l'apprenant le demande explicitement. Garde tes réponses orales concises et naturelles.`
 
@@ -155,7 +154,7 @@ function App() {
       setConnectionStep('Sécurisation de la connexion…')
       const controller = new AbortController()
       abortControllerRef.current = controller
-      const tokenResponse = await withTimeout(fetch(`${API_BASE}/api/live-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: controller.signal }), 25000, 'Le serveur Vercel ne répond pas. Vérifiez le déploiement et réessayez.', () => controller.abort())
+      const tokenResponse = await withTimeout(fetch('/api/live-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: controller.signal }), 25000, 'La fonction Vercel /api/live-token ne répond pas. Vérifiez son déploiement et les journaux de fonction, puis réessayez.', () => controller.abort())
       abortControllerRef.current = null
       if (attemptRef.current !== attempt) return
       const tokenPayload = await tokenResponse.json().catch(() => ({}))

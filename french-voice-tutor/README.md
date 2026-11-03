@@ -51,7 +51,7 @@ The `api/live-token.js` file provides the `/api/live-token` function required by
 
 Keep the project root set to this repository's root so Vercel can detect the `api` folder. The app and function are same-origin, so no public API key or separate `VITE_API_URL` is needed. Serve the app over HTTPS so mobile browsers permit microphone access.
 
-For a different production host, serve `/api/*` through the Express backend or set `VITE_API_URL` to that backend's HTTPS origin. Configure `APP_ORIGIN` on the backend to allow that frontend origin.
+For a different production host, serve `/api/*` through a same-origin reverse proxy to the Express backend. The browser intentionally calls the relative `/api/live-token` path so production builds cannot accidentally call a developer machine or expose an API URL in frontend settings.
 
 ## Microphone and troubleshooting
 
