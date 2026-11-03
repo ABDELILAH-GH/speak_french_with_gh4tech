@@ -113,7 +113,13 @@ function App() {
       streamRef.current = mic
       const tokenResponse = await fetch(`${API_BASE}/api/live-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       const tokenPayload = await tokenResponse.json().catch(() => ({}))
-      if (!tokenResponse.ok) throw new Error(tokenPayload.error || 'Impossible de sécuriser la connexion Gemini.')
+      if (!tokenResponse.ok) {
+        const message = tokenPayload.error || (tokenResponse.status === 404
+          ? 'La route API Gemini manque dans le déploiement Vercel. Redéployez le projet avec le dossier api.'
+          : 'Impossible de sécuriser la connexion Gemini.')
+        throw new Error(message)
+      }
+      if (!tokenPayload.token) throw new Error('Vercel n’a pas renvoyé de jeton Gemini. Vérifiez les journaux des fonctions Vercel.')
 
       const { GoogleGenAI, Modality } = await import('@google/genai')
       const ai = new GoogleGenAI({ apiKey: tokenPayload.token, apiVersion: 'v1beta' })
