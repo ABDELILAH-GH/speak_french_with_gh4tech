@@ -47,9 +47,11 @@ npm run dev:server
 
 ### Deploy on Vercel
 
-The `api/live-token.js` file provides the `/api/live-token` function required by the deployed frontend. In Vercel, open **Project → Settings → Environment Variables** and add `GEMINI_API_KEY` for both **Production** and **Preview**. Then deploy the latest project again. Do not use a `VITE_` prefix for this secret. Vercel only applies changed environment variables to new deployments.
+The `api/live-token.js` file provides the `/api/live-token` function required by the deployed frontend. The `api/health.js` endpoint checks that the function and server-side key configuration are present without returning the key. In Vercel, open **Project → Settings → Environment Variables** and add `GEMINI_API_KEY` for both **Production** and **Preview**. Then deploy the latest project again. Do not use a `VITE_` prefix for this secret. Vercel only applies changed environment variables to new deployments.
 
 Keep the project root set to this repository's root so Vercel can detect the `api` folder. The app and function are same-origin, so no public API key or separate `VITE_API_URL` is needed. Serve the app over HTTPS so mobile browsers permit microphone access.
+
+After deployment, open `https://YOUR-DOMAIN/api/health`. A successful check returns `ok: true` and `geminiKeyConfigured: true`. `false` means the environment variable is missing from that deployment; a 404 means the current deployment does not include the root `api` folder. A browser GET to `/api/live-token` returns 405 by design; the conversation starts it with POST.
 
 For a different production host, serve `/api/*` through a same-origin reverse proxy to the Express backend. The browser intentionally calls the relative `/api/live-token` path so production builds cannot accidentally call a developer machine or expose an API URL in frontend settings.
 
