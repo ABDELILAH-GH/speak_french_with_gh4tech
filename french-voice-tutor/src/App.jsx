@@ -28,12 +28,24 @@ function base64ToPcm(data) {
   return samples
 }
 
+function withTimeout(promise, milliseconds, message, onTimeout) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new Error(message))
+      onTimeout?.()
+    }, milliseconds)
+  })
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timer))
+}
+
 function App() {
   const [status, setStatus] = useState('disconnected')
   const [muted, setMuted] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [transcript, setTranscript] = useState([])
   const [error, setError] = useState('')
+  const [connectionStep, setConnectionStep] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const sessionRef = useRef(null)
   const streamRef = useRef(null)
@@ -46,14 +58,22 @@ function App() {
   const activeRef = useRef(false)
   const mutedRef = useRef(muted)
   const transcriptRef = useRef([])
+  const attemptRef = useRef(0)
+  const abortControllerRef = useRef(null)
+  const attemptTimerRef = useRef(null)
+  const connectionStepRef = useRef(connectionStep)
 
   useEffect(() => { mutedRef.current = muted }, [muted])
+  useEffect(() => { connectionStepRef.current = connectionStep }, [connectionStep])
   useEffect(() => {
-    if (status === 'disconnected' || status === 'error') return undefined
+    if (status !== 'listening' && status !== 'speaking') return undefined
     const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000)
     return () => window.clearInterval(timer)
   }, [status])
   useEffect(() => () => {
+    attemptRef.current += 1
+    window.clearTimeout(attemptTimerRef.current)
+    abortControllerRef.current?.abort()
     activeRef.current = false
     sessionRef.current?.close?.()
     for (const node of playbackNodesRef.current) {
@@ -81,6 +101,11 @@ function App() {
   }
 
   function stopSession(update = true) {
+    attemptRef.current += 1
+    window.clearTimeout(attemptTimerRef.current)
+    attemptTimerRef.current = null
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
     activeRef.current = false
     sessionRef.current?.close?.()
     sessionRef.current = null
@@ -102,16 +127,37 @@ function App() {
 
   async function startSession() {
     if (activeRef.current) return
+    const attempt = attemptRef.current + 1
+    attemptRef.current = attempt
     setError('')
+    setConnectionStep('Autorisez le microphone…')
     setElapsed(0)
     setTranscript([])
     transcriptRef.current = []
     setStatus('connecting')
+    attemptTimerRef.current = window.setTimeout(() => {
+      if (attemptRef.current !== attempt) return
+      const step = connectionStepRef.current || 'connexion'
+      stopSession(false)
+      setError(`Délai dépassé pendant « ${step} ». Vérifiez le réseau du téléphone, puis réessayez.`)
+      setConnectionStep('')
+      setStatus('error')
+    }, 55000)
     try {
       if (!navigator.mediaDevices?.getUserMedia || !window.AudioContext) throw new Error('Votre navigateur ne permet pas la capture audio. Utilisez une version récente de Chrome, Edge ou Firefox.')
-      const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false })
+      const micRequest = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false })
+      micRequest.then((lateStream) => {
+        if (attemptRef.current !== attempt) lateStream.getTracks().forEach((track) => track.stop())
+      }).catch(() => {})
+      const mic = await withTimeout(micRequest, 30000, 'Le microphone ne répond pas. Vérifiez son autorisation dans les réglages du navigateur, puis réessayez.')
+      if (attemptRef.current !== attempt) { mic.getTracks().forEach((track) => track.stop()); return }
       streamRef.current = mic
-      const tokenResponse = await fetch(`${API_BASE}/api/live-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      setConnectionStep('Sécurisation de la connexion…')
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+      const tokenResponse = await withTimeout(fetch(`${API_BASE}/api/live-token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: controller.signal }), 25000, 'Le serveur Vercel ne répond pas. Vérifiez le déploiement et réessayez.', () => controller.abort())
+      abortControllerRef.current = null
+      if (attemptRef.current !== attempt) return
       const tokenPayload = await tokenResponse.json().catch(() => ({}))
       if (!tokenResponse.ok) {
         const message = tokenPayload.error || (tokenResponse.status === 404
@@ -121,9 +167,11 @@ function App() {
       }
       if (!tokenPayload.token) throw new Error('Vercel n’a pas renvoyé de jeton Gemini. Vérifiez les journaux des fonctions Vercel.')
 
-      const { GoogleGenAI, Modality } = await import('@google/genai')
+      setConnectionStep('Connexion à Gemini…')
+      const { GoogleGenAI, Modality } = await withTimeout(import('@google/genai'), 15000, 'Le module audio ne s’est pas chargé. Vérifiez votre connexion Internet, puis réessayez.')
+      if (attemptRef.current !== attempt) return
       const ai = new GoogleGenAI({ apiKey: tokenPayload.token, apiVersion: 'v1beta' })
-      const session = await ai.live.connect({
+      const connection = ai.live.connect({
         model: MODEL,
         config: {
           responseModalities: [Modality.AUDIO],
@@ -133,8 +181,12 @@ function App() {
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } } },
         },
         callbacks: {
-          onopen: () => { activeRef.current = true; setStatus('listening') },
+          onopen: () => {
+            if (attemptRef.current !== attempt) return
+            setConnectionStep('Connexion audio établie…')
+          },
           onmessage: (message) => {
+            if (attemptRef.current !== attempt) return
             const content = message.serverContent
             if (!content) return
             if (content.interimInputTranscription?.text) addTranscript('you', content.interimInputTranscription.text, true)
@@ -174,12 +226,14 @@ function App() {
             }
           },
           onerror: (event) => {
+            if (attemptRef.current !== attempt) return
             const messageText = event?.message || 'La connexion Gemini a rencontré un problème.'
             setError(messageText)
             setStatus('error')
             stopSession(false)
           },
           onclose: (event) => {
+            if (attemptRef.current !== attempt) return
             if (!activeRef.current) return
             activeRef.current = false
             setStatus('disconnected')
@@ -188,10 +242,17 @@ function App() {
           },
         },
       })
+      connection.then((lateSession) => {
+        if (attemptRef.current !== attempt) lateSession.close()
+      }).catch(() => {})
+      const session = await withTimeout(connection, 25000, 'Gemini ne répond pas. Vérifiez la clé API Vercel et l’accès au modèle Live.')
+      if (attemptRef.current !== attempt) { session.close(); return }
       sessionRef.current = session
+      setConnectionStep('Préparation du microphone…')
       const context = new AudioContext()
       contextRef.current = context
-      await context.resume()
+      await withTimeout(context.resume(), 10000, 'Le navigateur n’a pas pu démarrer le son. Fermez les autres appels audio et réessayez.')
+      if (attemptRef.current !== attempt) { context.close().catch(() => {}); return }
       const source = context.createMediaStreamSource(mic)
       const processor = context.createScriptProcessor(4096, 1, 1)
       const muteOutput = context.createGain()
@@ -229,6 +290,8 @@ function App() {
         turns: [{ role: 'user', parts: [{ text: 'Commence la séance en m’accueillant chaleureusement. Dis exactement qui tu es et que tu vas m’aider à apprendre le français, puis pose-moi une question simple pour lancer notre conversation.' }] }],
         turnComplete: true,
       })
+      window.clearTimeout(attemptTimerRef.current)
+      attemptTimerRef.current = null
     } catch (cause) {
       stopSession(false)
       setError(cause.name === 'NotAllowedError' ? 'Accès au micro refusé. Autorisez le microphone dans les réglages du navigateur puis réessayez.' : cause.name === 'NotFoundError' ? 'Aucun microphone disponible. Branchez ou activez un microphone.' : cause.message || 'La connexion n’a pas pu démarrer.')
@@ -248,7 +311,7 @@ function App() {
       <section className="workspace" id="home">
         <div className="intro"><div className="eyebrow"><Sparkles size={14} /> VOTRE PROFESSEURE DE FRANÇAIS</div><h1>Parlons français,<br /><em>tout simplement.</em></h1><p>Une vraie conversation pour progresser à votre rythme.</p></div>
         <div className={`session-card ${status}`}>
-          <div className="session-head"><div><div className="session-kicker"><span className={`status-dot ${status}`} />{statusLabel}</div><div className="mode-title"><BookOpen size={16} /> Conversation libre</div></div><div className="timer"><span className="timer-dot" />{formatTime}</div></div>
+          <div className="session-head"><div><div className="session-kicker"><span className={`status-dot ${status}`} />{status === 'connecting' ? connectionStep || statusLabel : statusLabel}</div><div className="mode-title"><BookOpen size={16} /> Conversation libre</div></div><div className="timer"><span className="timer-dot" />{formatTime}</div></div>
           <div className={`teacher-visual ${status}`} aria-label={statusLabel}><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="avatar"><span className="avatar-glow" /><span className="avatar-letter">C</span><Sparkles className="avatar-spark" size={14} /></div><div className="sound-bars" aria-hidden="true">{Array.from({ length: 25 }, (_, index) => <span key={index} style={{ '--i': index, '--h': `${9 + ((index * 17) % 24)}px` }} />)}</div><div className="teacher-name">Camille <span>·</span> votre professeure</div></div>
           <div className="session-controls"><button className={`mic-button ${status === 'listening' ? 'active' : ''}`} onClick={status === 'disconnected' || status === 'error' ? startSession : () => setMuted((value) => !value)} disabled={status === 'connecting'} aria-label={status === 'disconnected' || status === 'error' ? 'Démarrer la conversation' : muted ? 'Réactiver le microphone' : 'Couper le microphone'}>{status === 'connecting' ? <span className="spinner" /> : status === 'disconnected' || status === 'error' ? <Mic size={23} /> : muted ? <MicOff size={22} /> : <Mic size={23} />}</button><span className="control-hint">{status === 'disconnected' || status === 'error' ? 'Démarrer la conversation' : muted ? 'Micro coupé' : status === 'connecting' ? 'Connexion…' : 'Touchez pour couper le micro'}</span>{status !== 'disconnected' && status !== 'error' && <button className="end-button" onClick={() => { stopSession(); setElapsed(0) }} aria-label="Terminer la conversation"><Phone size={18} /></button>}</div>
           {error && <div className="error-box"><X size={16} /><span>{error}</span></div>}
